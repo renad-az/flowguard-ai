@@ -3,66 +3,73 @@ import re
 from pywinauto import Desktop
 
 
-def main():
+TIMESTAMP_PATTERN = re.compile(
+    r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}"
+    r"[,\s]+\d{1,2}:\d{2}(?::\d{2})?"
+    r"(?:\s*[AP]M)?",
+    re.IGNORECASE,
+)
+
+
+def read_refresh_time(
+    report_title="FlowBI - Power BI Desktop",
+    card_title="Refresh Check Time",
+):
     reports = [
         window
         for window in Desktop(backend="uia").windows()
-        if window.window_text() == "FlowBI - Power BI Desktop"
+        if window.window_text() == report_title
     ]
 
     if len(reports) != 1:
-        print("STOP: Expected exactly one FlowBI report.")
-        return
-
-    report = reports[0]
-
-    # نبحث عن نص يحتوي تاريخًا ووقتًا، مثل:
-    # 24/10/2026 00:50:53
-    pattern = re.compile(
-        r"\d{1,4}[/.-]\d{1,2}[/.-]\d{1,4}"
-        r"[,\s]+\d{1,2}:\d{2}(?::\d{2})?"
-        r"(?:\s*[AP]M)?",
-        re.IGNORECASE,
-    )
-
-    found = set()
-    read_errors = 0
-
-    for control in report.descendants():
-        try:
-            if not control.is_visible():
-                continue
-
-            name = control.element_info.name or ""
-
-            for match in pattern.finditer(name):
-                timestamp = match.group(0)
-
-                if timestamp not in found:
-                    found.add(timestamp)
-                    print("CANDIDATE TIME:", timestamp)
-                    print(
-                        "CONTROL TYPE:",
-                        control.element_info.control_type,
-                    )
-
-        except Exception:
-            read_errors += 1
-
-    if not found:
-        print("NOT FOUND: No readable timestamp captured.")
-        print(
-            "The card may not expose its value through "
-            "Windows accessibility."
-        )
-    else:
-        print(
-            "Discovery only. These times are not yet "
-            "confirmed as the RefreshCheck card."
+        raise RuntimeError(
+            "Expected exactly one matching Power BI report."
         )
 
-    if read_errors:
-        print("Controls that could not be inspected:", read_errors)
+    times = set()
+    matching_cards = 0
+
+    for control in reports[0].descendants(
+        control_type="DataItem"
+    ):
+        if not control.is_visible():
+            continue
+
+        name = (control.element_info.name or "").strip()
+
+        if not name.startswith(card_title + ","):
+            continue
+
+        match = TIMESTAMP_PATTERN.search(name)
+
+        if match is not None:
+            matching_cards += 1
+            times.add(match.group(0))
+
+    if not times:
+        raise RuntimeError(
+            "Refresh Check Time card was not readable. "
+            "Check its title and visibility."
+        )
+
+    if matching_cards != 1:
+        raise RuntimeError(
+            "Multiple timestamp card elements found. "
+            "Cannot select one safely."
+        )
+
+    return times.pop()
+
+
+def main():
+    try:
+        timestamp = read_refresh_time()
+        print("REFRESH CHECK TIME:", timestamp)
+        print("Read only. No refresh triggered.")
+
+    except Exception as error:
+        print("READ FAILED:", type(error).__name__, str(error))
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":
