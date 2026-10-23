@@ -18,29 +18,40 @@ def file_hash(path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monitor Excel changes and run validation."
+        description="Monitor Excel and optionally trigger Power BI refresh."
     )
+
     parser.add_argument("source", type=Path)
     parser.add_argument("baseline", type=Path)
     parser.add_argument("approved", type=Path)
+
+    parser.add_argument(
+        "--refresh",
+        action="store_true",
+        help="Trigger the experimental Power BI refresh script.",
+    )
+
     args = parser.parse_args()
 
     source = args.source.resolve()
     baseline = args.baseline.resolve()
     approved = args.approved.resolve()
 
-    approval_script = Path(__file__).resolve().with_name(
-        "approve_workbook.py"
-    )
+    script_folder = Path(__file__).resolve().parent
+    approval_script = script_folder / "approve_workbook.py"
+    refresh_script = script_folder / "refresh_powerbi.py"
 
     if not source.is_file():
-        parser.error(f"Source file not found: {source}")
+        parser.error(f"Source not found: {source}")
 
     if not baseline.is_file():
         parser.error(f"Baseline not found: {baseline}")
 
     if source == approved:
         parser.error("Source and approved must be separate files.")
+
+    if args.refresh and not refresh_script.is_file():
+        parser.error(f"Refresh script not found: {refresh_script}")
 
     try:
         last_processed = file_hash(source)
@@ -52,8 +63,8 @@ def main():
     waiting_message_shown = False
 
     print("MONITORING:", source.name, flush=True)
-    print("Save a change in Excel to trigger validation.", flush=True)
-    print("Power BI refresh is not connected yet.", flush=True)
+    print("Refresh trigger enabled:", args.refresh, flush=True)
+    print("Refresh completion is not verified automatically.", flush=True)
     print("Press Ctrl+C to stop.", flush=True)
 
     try:
@@ -62,6 +73,7 @@ def main():
 
             try:
                 current_hash = file_hash(source)
+
             except OSError:
                 candidate = None
                 stable_checks = 0
@@ -85,7 +97,11 @@ def main():
             if current_hash != candidate:
                 candidate = current_hash
                 stable_checks = 1
-                print("CHANGE DETECTED: Waiting for stability.", flush=True)
+
+                print(
+                    "CHANGE DETECTED: Waiting for stability.",
+                    flush=True,
+                )
                 continue
 
             stable_checks += 1
@@ -93,9 +109,9 @@ def main():
             if stable_checks < 3:
                 continue
 
-            print("CHECKING: Running validation and approval.", flush=True)
+            print("CHECKING: Running validation.", flush=True)
 
-            result = subprocess.run(
+            approval = subprocess.run(
                 [
                     sys.executable,
                     str(approval_script),
@@ -106,16 +122,51 @@ def main():
                 check=False,
             )
 
-            if result.returncode == 0:
-                print("MONITOR: Approval succeeded.", flush=True)
-            else:
+            if approval.returncode != 0:
                 print(
-                    "MONITOR: Approval failed or was blocked. "
-                    "Review the message, correct the issue, and save again.",
+                    "MONITOR: Not approved. Refresh skipped.",
                     flush=True,
                 )
 
-            # لا نكرر المحاولة لنفس المحتوى بلا نهاية
+            else:
+                print("MONITOR: Approval succeeded.", flush=True)
+
+                if args.refresh:
+                    print(
+                        "MONITOR: Starting refresh trigger.",
+                        flush=True,
+                    )
+
+                    try:
+                        refresh = subprocess.run(
+                            [
+                                sys.executable,
+                                str(refresh_script),
+                            ],
+                            check=False,
+                            timeout=60,
+                        )
+
+                        if refresh.returncode != 0:
+                            print(
+                                "MONITOR: Refresh script failed.",
+                                flush=True,
+                            )
+                        else:
+                            print(
+                                "MONITOR: Refresh script finished. "
+                                "Check its messages and Power BI; "
+                                "completion is not verified.",
+                                flush=True,
+                            )
+
+                    except subprocess.TimeoutExpired:
+                        print(
+                            "MONITOR: Refresh trigger timed out. "
+                            "Its outcome is unknown; check Power BI.",
+                            flush=True,
+                        )
+
             last_processed = candidate
             candidate = None
             stable_checks = 0
