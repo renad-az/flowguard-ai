@@ -1,109 +1,138 @@
 import subprocess
 import sys
 import time
+import traceback
 from pathlib import Path
 
 from pywinauto import Desktop
 
 
-def main():
-    desktop = Desktop(backend="uia")
+def refresh_dialogs(desktop, report):
+    candidates = report.descendants(control_type="Window")
 
-    reports = [
+    candidates.extend(
         window
         for window in desktop.windows()
-        if window.window_text() == "FlowBI - Power BI Desktop"
-    ]
-
-    if len(reports) != 1:
-        print("STOP: Expected exactly one FlowBI report.")
-        return
-
-    report = reports[0]
-    process_id = report.process_id()
-
-    trigger_script = Path(__file__).resolve().with_name(
-        "refresh_powerbi.py"
+        if window.process_id() == report.process_id()
+        and window.handle != report.handle
     )
 
-    if not trigger_script.is_file():
-        print("STOP: Refresh script not found.")
-        return
+    dialogs = []
 
-    seen_messages = set()
+    for window in candidates:
+        title = window.window_text().strip()
 
-    print("Observing refresh dialogs for 30 seconds.", flush=True)
+        if (
+            title.lower() == "refresh"
+            or title == "تحديث"
+        ) and window.is_visible():
+            dialogs.append(window)
 
-    trigger = subprocess.Popen(
-        [sys.executable, str(trigger_script)]
-    )
+    return dialogs
 
-    deadline = time.monotonic() + 30
+
+def main():
+    trigger = None
 
     try:
+        desktop = Desktop(backend="uia")
+
+        reports = [
+            window
+            for window in desktop.windows()
+            if window.window_text() == "FlowBI - Power BI Desktop"
+        ]
+
+        if len(reports) != 1:
+            print("STOP: Expected exactly one FlowBI report.")
+            return
+
+        report = reports[0]
+
+        trigger_script = Path(__file__).resolve().with_name(
+            "refresh_powerbi.py"
+        )
+
+        if not trigger_script.is_file():
+            print("STOP: Refresh script not found.")
+            return
+
+        if refresh_dialogs(desktop, report):
+            print("STOP: A refresh dialog is already open.")
+            print("No new refresh command sent.")
+            return
+
+        trigger = subprocess.Popen(
+            [sys.executable, str(trigger_script)]
+        )
+
+        deadline = time.monotonic() + 40
+        started = False
+        absent_checks = 0
+        printed_messages = set()
+
         while time.monotonic() < deadline:
-            candidates = report.descendants(
-                control_type="Window"
-            )
+            dialogs = refresh_dialogs(desktop, report)
 
-            candidates.extend(
-                window
-                for window in desktop.windows()
-                if window.process_id() == process_id
-                and window.handle != report.handle
-            )
+            if dialogs:
+                absent_checks = 0
 
-            for dialog in candidates:
-                try:
-                    title = dialog.window_text() or ""
-
-                    if not (
-                        "refresh" in title.lower()
-                        or "تحديث" in title
-                    ):
-                        continue
-
-                    if not dialog.is_visible():
-                        continue
-
-                    messages = [
-                        item.window_text()
-                        for item in dialog.descendants(
-                            control_type="Text"
-                        )
-                        if item.window_text().strip()
-                    ]
-
-                    signature = (title, tuple(messages))
-
-                    if signature in seen_messages:
-                        continue
-
-                    seen_messages.add(signature)
-
-                    print("\nDIALOG:", title, flush=True)
-
-                    for message in messages[:30]:
-                        print("TEXT:", message, flush=True)
-
-                except Exception as error:
+                if not started:
+                    started = True
                     print(
-                        "Dialog changed while reading:",
-                        type(error).__name__,
+                        "REFRESH STARTED: Dialog detected.",
                         flush=True,
                     )
 
+                for dialog in dialogs:
+                    for control in dialog.descendants(
+                        control_type="Text"
+                    ):
+                        message = control.window_text().strip()
+
+                        if message and message not in printed_messages:
+                            printed_messages.add(message)
+
+                            print(
+                                "STATUS:",
+                                message,
+                                flush=True,
+                            )
+
+            elif started:
+                absent_checks += 1
+
+                if absent_checks >= 3:
+                    print("DIALOG CLOSED: No longer visible.")
+                    print(
+                        "OUTCOME: Unverified. "
+                        "Dialog closure alone does not prove success."
+                    )
+                    return
+
             time.sleep(0.5)
 
+        if started:
+            print("TIMEOUT: Refresh dialog did not finish in time.")
+            print("Check Power BI. No automatic retry.")
+        else:
+            print("UNKNOWN: No refresh dialog was captured.")
+            print("Do not assume that refresh succeeded.")
+
+    except Exception:
+        traceback.print_exc()
+
+        print(
+            "Refresh outcome is unknown. Check Power BI.",
+            flush=True,
+        )
+
     finally:
-        print("\nObservation finished.", flush=True)
-        print("Trigger process exit code:", trigger.poll())
-
-        if not seen_messages:
-            print("No matching dialog captured.")
-            print("This does NOT prove success or failure.")
-
-        print("Refresh completion is not verified yet.")
+        if trigger is not None:
+            print(
+                "Trigger script exit code:",
+                trigger.poll(),
+            )
 
 
 if __name__ == "__main__":
