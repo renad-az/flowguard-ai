@@ -31,6 +31,19 @@ def refresh_dialogs(desktop, report):
     return dialogs
 
 
+def read_messages(dialogs):
+    messages = []
+
+    for dialog in dialogs:
+        for control in dialog.descendants(control_type="Text"):
+            message = control.window_text().strip()
+
+            if message:
+                messages.append(message)
+
+    return messages
+
+
 def main():
     trigger = None
 
@@ -69,10 +82,40 @@ def main():
         deadline = time.monotonic() + 40
         started = False
         absent_checks = 0
+        consecutive_errors = 0
         printed_messages = set()
 
         while time.monotonic() < deadline:
-            dialogs = refresh_dialogs(desktop, report)
+            try:
+                dialogs = refresh_dialogs(desktop, report)
+                messages = read_messages(dialogs)
+
+            except Exception as error:
+                consecutive_errors += 1
+
+                # فشل الرصد ليس دليلًا على اختفاء النافذة
+                absent_checks = 0
+
+                print(
+                    "OBSERVATION RETRY:",
+                    consecutive_errors,
+                    "|",
+                    type(error).__name__,
+                    flush=True,
+                )
+
+                if consecutive_errors >= 3:
+                    traceback.print_exc()
+                    print(
+                        "UNKNOWN: Repeated observation failures."
+                    )
+                    print("Check Power BI. No automatic retry.")
+                    return
+
+                time.sleep(1)
+                continue
+
+            consecutive_errors = 0
 
             if dialogs:
                 absent_checks = 0
@@ -84,20 +127,10 @@ def main():
                         flush=True,
                     )
 
-                for dialog in dialogs:
-                    for control in dialog.descendants(
-                        control_type="Text"
-                    ):
-                        message = control.window_text().strip()
-
-                        if message and message not in printed_messages:
-                            printed_messages.add(message)
-
-                            print(
-                                "STATUS:",
-                                message,
-                                flush=True,
-                            )
+                for message in messages:
+                    if message not in printed_messages:
+                        printed_messages.add(message)
+                        print("STATUS:", message, flush=True)
 
             elif started:
                 absent_checks += 1
@@ -114,25 +147,18 @@ def main():
 
         if started:
             print("TIMEOUT: Refresh dialog did not finish in time.")
-            print("Check Power BI. No automatic retry.")
         else:
             print("UNKNOWN: No refresh dialog was captured.")
-            print("Do not assume that refresh succeeded.")
+
+        print("Check Power BI. No automatic retry.")
 
     except Exception:
         traceback.print_exc()
-
-        print(
-            "Refresh outcome is unknown. Check Power BI.",
-            flush=True,
-        )
+        print("Refresh outcome is unknown. Check Power BI.")
 
     finally:
         if trigger is not None:
-            print(
-                "Trigger script exit code:",
-                trigger.poll(),
-            )
+            print("Trigger script exit code:", trigger.poll())
 
 
 if __name__ == "__main__":
