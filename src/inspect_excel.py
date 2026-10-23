@@ -1,4 +1,5 @@
 import argparse
+import json
 from collections import Counter
 from datetime import date, datetime, time
 from pathlib import Path
@@ -43,21 +44,30 @@ def inspect_excel(file_path):
         data_only=False,
     )
 
-    try:
-        print(f"File: {file_path.name}")
+    profile = {
+        "assumptions": [
+            "The first row is treated as column headers.",
+            "Completely empty data rows are excluded.",
+            "Missing values are observations, not confirmed errors.",
+            "Formulas are identified but not evaluated.",
+        ],
+        "sheets": [],
+    }
 
+    try:
         for sheet in workbook.worksheets:
             rows = sheet.iter_rows()
             header_cells = next(rows, ())
 
             columns = [
                 {
+                    "position": index,
                     "name": (
                         str(cell.value)
                         if not is_empty(cell.value)
-                        else f"(unnamed column {index})"
+                        else None
                     ),
-                    "missing": 0,
+                    "missing_count": 0,
                     "types": Counter(),
                 }
                 for index, cell in enumerate(header_cells, start=1)
@@ -72,47 +82,53 @@ def inspect_excel(file_path):
                 data_rows += 1
 
                 for index, column in enumerate(columns):
-                    if index >= len(row) or is_empty(row[index].value):
-                        column["missing"] += 1
+                    if (
+                        index >= len(row)
+                        or is_empty(row[index].value)
+                    ):
+                        column["missing_count"] += 1
                     else:
                         value_type = detect_type(row[index])
                         column["types"][value_type] += 1
 
-            print(f"\nSheet: {sheet.title}")
-            print(f"Data rows: {data_rows}")
-
             for column in columns:
-                types_summary = ", ".join(
-                    f"{name}: {count}"
-                    for name, count in sorted(column["types"].items())
-                ) or "no nonempty values"
+                column["types"] = dict(column["types"])
 
-                missing = column["missing"]
-
-                missing_percent = (
-                    missing / data_rows * 100
-                    if data_rows > 0
-                    else 0
+                column["missing_percent"] = (
+                    round(
+                        column["missing_count"] / data_rows * 100,
+                        2,
+                    )
+                    if data_rows
+                    else None
                 )
 
-                print(f"  Column: {column['name']}")
-                print(
-                    f"    Missing: {missing}/{data_rows} "
-                    f"({missing_percent:.1f}%)"
-                )
-                print(f"    Types: {types_summary}")
+            profile["sheets"].append({
+                "name": sheet.title,
+                "data_rows": data_rows,
+                "columns": columns,
+            })
 
     finally:
         workbook.close()
 
+    return profile
+
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Profile columns in an Excel workbook."
+        description="Create an Excel column profile without cell values."
     )
-    parser.add_argument("file", type=Path)
-    args = parser.parse_args()
 
+    parser.add_argument("file", type=Path)
+
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=Path("reports/data_profile.json"),
+    )
+
+    args = parser.parse_args()
     file_path = args.file.resolve()
 
     if not file_path.is_file():
@@ -121,7 +137,23 @@ def main():
     if file_path.suffix.lower() != ".xlsx":
         parser.error("This version supports .xlsx files only.")
 
-    inspect_excel(file_path)
+    profile = inspect_excel(file_path)
+
+    output_path = args.output.resolve()
+
+    if output_path == file_path:
+        parser.error("Output must not overwrite the source workbook.")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    output_path.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+    print(f"Profile saved: {output_path}")
+    print(f"Sheets inspected: {len(profile['sheets'])}")
+    print("No cell values included. No AI request sent.")
 
 
 if __name__ == "__main__":
