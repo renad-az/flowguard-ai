@@ -10,6 +10,24 @@ from read_refresh_time import read_refresh_time
 from verify_refresh_time import parse_timestamp
 
 
+def read_time_with_retry(timeout=8):
+    deadline = time.monotonic() + timeout
+    last_error = None
+
+    while time.monotonic() < deadline:
+        try:
+            text = read_refresh_time()
+            return text, parse_timestamp(text)
+
+        except Exception as error:
+            last_error = error
+            time.sleep(0.5)
+
+    raise RuntimeError(
+        f"Timestamp remained unreadable: {last_error}"
+    )
+
+
 def main():
     try:
         desktop = Desktop(backend="uia")
@@ -27,13 +45,15 @@ def main():
 
         report = reports[0]
 
+        # إظهار التقرير قبل محاولة قراءة البطاقة
+        report.set_focus()
+        time.sleep(1)
+
         if refresh_dialogs(desktop, report):
             print("STOP: A refresh dialog is already open.")
             return 1
 
-        before_text = read_refresh_time()
-        before = parse_timestamp(before_text)
-
+        before_text, before = read_time_with_retry()
         print("BEFORE:", before_text, flush=True)
 
         trigger_script = Path(__file__).resolve().with_name(
@@ -113,20 +133,21 @@ def main():
                 if absent_checks >= 3:
                     if possible_failure:
                         print(
-                            "REVIEW: A possible failure message "
-                            "was captured. Check Power BI."
+                            "REVIEW: Possible failure message captured."
                         )
                         return 1
 
                     if trigger.poll() != 0:
                         print(
-                            "UNKNOWN: Trigger script did not "
-                            "finish successfully."
+                            "UNKNOWN: Trigger did not finish "
+                            "successfully."
                         )
                         return 1
 
-                    after_text = read_refresh_time()
-                    after = parse_timestamp(after_text)
+                    report.set_focus()
+
+                    # ننتظر إتاحة البطاقة بعد إغلاق نافذة التحديث
+                    after_text, after = read_time_with_retry()
 
                     print("AFTER:", after_text)
 
@@ -141,8 +162,7 @@ def main():
                         return 0
 
                     print(
-                        "UNKNOWN: Dialog closed, but "
-                        "timestamp did not advance."
+                        "UNKNOWN: Timestamp did not advance."
                     )
                     return 1
 

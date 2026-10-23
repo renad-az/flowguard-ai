@@ -18,7 +18,7 @@ def file_hash(path):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monitor Excel and optionally trigger Power BI refresh."
+        description="Monitor Excel with guarded Power BI refresh."
     )
 
     parser.add_argument("source", type=Path)
@@ -28,7 +28,7 @@ def main():
     parser.add_argument(
         "--refresh",
         action="store_true",
-        help="Trigger the experimental Power BI refresh script.",
+        help="Run the experimental monitored refresh cycle.",
     )
 
     args = parser.parse_args()
@@ -39,7 +39,7 @@ def main():
 
     script_folder = Path(__file__).resolve().parent
     approval_script = script_folder / "approve_workbook.py"
-    refresh_script = script_folder / "refresh_powerbi.py"
+    refresh_script = script_folder / "run_refresh_cycle.py"
 
     if not source.is_file():
         parser.error(f"Source not found: {source}")
@@ -50,24 +50,24 @@ def main():
     if source == approved:
         parser.error("Source and approved must be separate files.")
 
-    if args.refresh and not refresh_script.is_file():
-        parser.error(f"Refresh script not found: {refresh_script}")
+    if not approval_script.is_file():
+        parser.error("Approval script not found.")
 
-    try:
-        last_processed = file_hash(source)
-    except OSError as error:
-        parser.error(f"Could not read source: {error}")
+    if args.refresh and not refresh_script.is_file():
+        parser.error("Refresh cycle script not found.")
 
     candidate = None
     stable_checks = 0
     waiting_message_shown = False
 
-    print("MONITORING:", source.name, flush=True)
-    print("Refresh trigger enabled:", args.refresh, flush=True)
-    print("Refresh completion is not verified automatically.", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
-
     try:
+        last_processed = file_hash(source)
+
+        print("MONITORING:", source.name, flush=True)
+        print("Refresh cycle enabled:", args.refresh, flush=True)
+        print("Unknown refresh outcome stops monitoring.", flush=True)
+        print("Press Ctrl+C to stop.", flush=True)
+
         while True:
             time.sleep(2)
 
@@ -120,6 +120,7 @@ def main():
                     str(approved),
                 ],
                 check=False,
+                timeout=120,
             )
 
             if approval.returncode != 0:
@@ -133,47 +134,67 @@ def main():
 
                 if args.refresh:
                     print(
-                        "MONITOR: Starting refresh trigger.",
+                        "MONITOR: Starting observed refresh cycle.",
                         flush=True,
                     )
 
-                    try:
-                        refresh = subprocess.run(
-                            [
-                                sys.executable,
-                                str(refresh_script),
-                            ],
-                            check=False,
-                            timeout=60,
-                        )
+                    refresh = subprocess.run(
+                        [
+                            sys.executable,
+                            str(refresh_script),
+                        ],
+                        check=False,
+                        timeout=120,
+                    )
 
-                        if refresh.returncode != 0:
-                            print(
-                                "MONITOR: Refresh script failed.",
-                                flush=True,
-                            )
-                        else:
-                            print(
-                                "MONITOR: Refresh script finished. "
-                                "Check its messages and Power BI; "
-                                "completion is not verified.",
-                                flush=True,
-                            )
-
-                    except subprocess.TimeoutExpired:
+                    if refresh.returncode != 0:
                         print(
-                            "MONITOR: Refresh trigger timed out. "
-                            "Its outcome is unknown; check Power BI.",
+                            "MONITOR STOPPED: Refresh outcome "
+                            "needs review. No automatic retry.",
                             flush=True,
                         )
+                        print(
+                            "Check Power BI before restarting. "
+                            "The approved file remains published.",
+                            flush=True,
+                        )
+                        return 1
+
+                    print(
+                        "MONITOR: Dialog closure and newer "
+                        "check timestamp observed.",
+                        flush=True,
+                    )
+                    print(
+                        "All-table success is not verified.",
+                        flush=True,
+                    )
 
             last_processed = candidate
             candidate = None
             stable_checks = 0
 
+    except subprocess.TimeoutExpired:
+        print(
+            "\nMONITOR STOPPED: A subprocess timed out. "
+            "Its outcome is unknown. Check Power BI and files "
+            "before restarting.",
+            flush=True,
+        )
+        return 1
+
     except KeyboardInterrupt:
-        print("\nMonitoring stopped.", flush=True)
+        print(
+            "\nMonitoring stopped. If a refresh was running, "
+            "check Power BI before restarting.",
+            flush=True,
+        )
+        return 0
+
+    except OSError as error:
+        print("MONITOR STOPPED:", error, flush=True)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
