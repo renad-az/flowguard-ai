@@ -1,6 +1,6 @@
+import ctypes
 import json
 import time
-import ctypes
 from pathlib import Path
 
 from pywinauto import mouse
@@ -16,79 +16,72 @@ def main():
         raise RuntimeError("No active workspace.")
 
     project = Path(__file__).resolve().parents[1]
-    calibration_file = (
+    configuration_file = (
         project
         / "reports"
         / "refresh_targets"
         / f"{workspace['id']}.json"
     )
 
-    if not calibration_file.is_file():
-        raise RuntimeError(
-            "No refresh position saved for this workspace."
-        )
+    if not configuration_file.is_file():
+        raise RuntimeError("No refresh calibration for this workspace.")
 
     configuration = json.loads(
-        calibration_file.read_text(encoding="utf-8")
+        configuration_file.read_text(encoding="utf-8")
     )
 
     if configuration.get("version") != 1:
         raise RuntimeError("Unsupported calibration version.")
 
     if configuration.get("workspace_id") != workspace["id"]:
-        raise RuntimeError("Calibration workspace does not match.")
+        raise RuntimeError("Calibration belongs to another workspace.")
 
     report = get_report_window()
+    report_title = report.window_text()
+
+    if report_title != configuration["report_title"]:
+        raise RuntimeError("Report title does not match the calibration.")
+
     report.set_focus()
     time.sleep(1)
 
-    title = report.window_text()
-
-    if title != configuration["report_title"]:
-        raise RuntimeError("Report title does not match calibration.")
-
     rect = report.rectangle()
 
-    expected_size = (
+    if (rect.width(), rect.height()) != (
         configuration["window_width"],
         configuration["window_height"],
-    )
-
-    if (rect.width(), rect.height()) != expected_size:
+    ):
         raise RuntimeError(
-            "Window size changed. Recalibrate before refreshing."
+            "Window size changed. Capture the refresh position again."
         )
 
     x = configuration["relative_x"]
     y = configuration["relative_y"]
 
-    if type(x) is not int or type(y) is not int:
-        raise RuntimeError("Invalid saved coordinates.")
-
     if not (0 <= x < rect.width() and 0 <= y < rect.height()):
-        raise RuntimeError("Saved position is outside the window.")
+        raise RuntimeError("Saved position is outside the report.")
+
+    for dialog in report.descendants(control_type="Window"):
+        if dialog.is_visible():
+            raise RuntimeError(
+                "A report dialog is open. Close it before refreshing."
+            )
 
     current_workspace = get_active_workspace()
 
-    if (
-        not current_workspace
-        or current_workspace["id"] != workspace["id"]
-    ):
-        raise RuntimeError("Active workspace changed.")
+    if not current_workspace or current_workspace["id"] != workspace["id"]:
+        raise RuntimeError("Active workspace changed. Refresh cancelled.")
 
-    foreground = ctypes.windll.user32.GetForegroundWindow()
-
-    if foreground != report.handle:
-        raise RuntimeError("Report is not the foreground window.")
-
-    print("WORKSPACE:", workspace["name"])
-    print("REPORT:", title)
+    if ctypes.windll.user32.GetForegroundWindow() != report.handle:
+        raise RuntimeError("The report is not the foreground window.")
 
     mouse.click(
         button="left",
         coords=(rect.left + x, rect.top + y),
     )
 
+    print("WORKSPACE:", workspace["name"])
+    print("REPORT:", report_title)
     print("Refresh click sent using saved calibration.")
     print("Completion is NOT verified. Check Power BI.")
     return 0
@@ -98,5 +91,5 @@ if __name__ == "__main__":
     try:
         raise SystemExit(main())
     except Exception as error:
-        print("REFRESH FAILED:", type(error).__name__, str(error))
+        print("REFRESH NOT SENT:", type(error).__name__, str(error))
         raise SystemExit(1)
