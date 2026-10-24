@@ -1,6 +1,6 @@
 import re
 
-from pywinauto import Desktop
+from powerbi_target import get_report_window
 
 
 TIMESTAMP_PATTERN = re.compile(
@@ -11,24 +11,11 @@ TIMESTAMP_PATTERN = re.compile(
 )
 
 
-def read_refresh_time(
-    report_title="FlowBI - Power BI Desktop",
-    card_title="Refresh Check Time",
-):
-    reports = [
-        window
-        for window in Desktop(backend="uia").windows()
-        if window.window_text() == report_title
-    ]
-
-    if len(reports) != 1:
-        raise RuntimeError(
-            "Expected exactly one matching Power BI report."
-        )
-
+def read_refresh_time(card_title="Refresh Check Time"):
+    report = get_report_window()
     locations = {}
 
-    for control in reports[0].descendants(
+    for control in report.descendants(
         control_type="DataItem"
     ):
         if not control.is_visible():
@@ -59,23 +46,20 @@ def read_refresh_time(
             rectangle.bottom,
         )
 
-        timestamp = match.group(0)
-
         if location not in locations:
             locations[location] = set()
 
-        locations[location].add(timestamp)
+        locations[location].add(match.group(0))
 
     if not locations:
         raise RuntimeError(
-            "Refresh Check Time card was not readable. "
-            "Check its title and visibility."
+            "Refresh timestamp card was not readable "
+            "in the active workspace report."
         )
 
     if len(locations) != 1:
         raise RuntimeError(
-            "Timestamp cards found at different locations. "
-            "Cannot select one safely."
+            "Timestamp cards found at different locations."
         )
 
     times = next(iter(locations.values()))
@@ -93,7 +77,10 @@ def main():
         timestamp = read_refresh_time()
 
         print("REFRESH CHECK TIME:", timestamp)
-        print("Read only. No refresh triggered.")
+        print("Read from the active workspace report.")
+        print("No refresh triggered.")
+
+        return 0
 
     except Exception as error:
         print(
@@ -101,8 +88,8 @@ def main():
             type(error).__name__,
             str(error),
         )
-        raise SystemExit(1)
+        return 1
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
