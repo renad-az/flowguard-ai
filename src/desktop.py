@@ -4,80 +4,108 @@ from tkinter import messagebox, ttk
 
 from app import FlowGuardApp
 from ai_review_window import AIReviewWindow
+from correction_window import CorrectionWindow
 
 
 class FlowGuardDesktop(FlowGuardApp):
     def __init__(self, root):
         super().__init__(root)
 
-        self.review_window = None
+        self.tool_window = None
 
         self.ai_button = ttk.Button(
             self.start_button.master,
             text="AI Review",
             command=self.open_ai_review,
         )
+        self.ai_button.pack(side="left", padx=(12, 0))
 
-        self.ai_button.pack(
-            side="left",
-            padx=(12, 0),
+        self.correction_button = ttk.Button(
+            self.start_button.master,
+            text="Corrections",
+            command=self.open_corrections,
         )
+        self.correction_button.pack(side="left", padx=(8, 0))
 
     def set_busy(self, busy):
         super().set_busy(busy)
 
-        if hasattr(self, "ai_button"):
-            self.ai_button.configure(
-                state="disabled" if busy else "normal"
-            )
+        for name in ("ai_button", "correction_button"):
+            if hasattr(self, name):
+                getattr(self, name).configure(
+                    state="disabled" if busy else "normal"
+                )
 
-    def open_ai_review(self):
+    def tool_is_open(self):
+        return (
+            self.tool_window is not None
+            and self.tool_window.winfo_exists()
+        )
+
+    def open_tool(self, kind):
         if self.running:
             return
 
-        source = Path(self.source.get())
+        if self.tool_is_open():
+            self.tool_window.lift()
+            return
 
-        if not self.source.get() or not source.is_file():
+        source_text = self.source.get()
+
+        if not source_text or not Path(source_text).is_file():
             messagebox.showwarning(
                 "Choose source",
-                "Choose an existing Source Excel file first.",
+                "Choose an existing Source Excel file.",
             )
             return
 
-        if (
-            self.review_window is not None
-            and self.review_window.winfo_exists()
-        ):
-            self.review_window.lift()
-            return
+        if kind == "corrections":
+            baseline_text = self.baseline.get()
+
+            if (
+                not baseline_text
+                or not Path(baseline_text).is_file()
+            ):
+                messagebox.showwarning(
+                    "Choose baseline",
+                    "Choose an existing reviewed baseline.",
+                )
+                return
 
         window = tk.Toplevel(self.root)
 
         try:
-            AIReviewWindow(window, source.resolve())
+            if kind == "ai":
+                AIReviewWindow(
+                    window,
+                    Path(source_text).resolve(),
+                )
+            else:
+                CorrectionWindow(
+                    window,
+                    Path(source_text).resolve(),
+                    Path(self.baseline.get()).resolve(),
+                )
 
-            self.review_window = window
+            self.tool_window = window
             window.transient(self.root)
-
-            # يمنع بدء المراقبة من الواجهة أثناء المراجعة
             window.grab_set()
 
         except Exception as error:
             window.destroy()
+            messagebox.showerror("Could not open tool", str(error))
 
-            messagebox.showerror(
-                "Could not open AI review",
-                str(error),
-            )
+    def open_ai_review(self):
+        self.open_tool("ai")
+
+    def open_corrections(self):
+        self.open_tool("corrections")
 
     def close(self):
-        if (
-            self.review_window is not None
-            and self.review_window.winfo_exists()
-        ):
+        if self.tool_is_open():
             messagebox.showinfo(
-                "AI review open",
-                "Close the AI review window first.",
+                "Tool window open",
+                "Close the tool window first.",
             )
             return
 
@@ -92,4 +120,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
