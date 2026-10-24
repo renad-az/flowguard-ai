@@ -1,2 +1,2 @@
-openpyxl
+openpyxl==3.1.5
 pywinauto==0.6.9
