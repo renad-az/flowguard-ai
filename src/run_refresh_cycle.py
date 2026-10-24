@@ -6,18 +6,34 @@ from pathlib import Path
 from pywinauto import Desktop
 
 from observe_refresh import refresh_dialogs, read_messages
+from powerbi_target import get_report_window
 from read_refresh_time import read_refresh_time
 from verify_refresh_time import parse_timestamp
+from workspace_store import get_active_workspace
 
 
-def read_time_with_retry(timeout=8):
+def ensure_same_workspace(expected):
+    current = get_active_workspace()
+
+    if current != expected:
+        raise RuntimeError(
+            "Active workspace or its settings changed during the cycle."
+        )
+
+
+def read_time_with_retry(workspace, timeout=8):
     deadline = time.monotonic() + timeout
     last_error = None
 
     while time.monotonic() < deadline:
+        ensure_same_workspace(workspace)
+
         try:
             text = read_refresh_time()
-            return text, parse_timestamp(text)
+            parsed = parse_timestamp(text)
+
+            ensure_same_workspace(workspace)
+            return text, parsed
 
         except Exception as error:
             last_error = error
@@ -30,22 +46,18 @@ def read_time_with_retry(timeout=8):
 
 def main():
     try:
+        workspace = get_active_workspace()
+
+        if not workspace:
+            raise RuntimeError("No active workspace.")
+
         desktop = Desktop(backend="uia")
+        report = get_report_window()
+        report_handle = report.handle
 
-        reports = [
-            window
-            for window in desktop.windows()
-            if window.window_text() == "FlowBI - Power BI Desktop"
-        ]
+        print("WORKSPACE:", workspace["name"], flush=True)
+        print("REPORT:", report.window_text(), flush=True)
 
-        if len(reports) != 1:
-            raise RuntimeError(
-                "Expected exactly one FlowBI report."
-            )
-
-        report = reports[0]
-
-        # إظهار التقرير قبل محاولة قراءة البطاقة
         report.set_focus()
         time.sleep(1)
 
@@ -53,7 +65,7 @@ def main():
             print("STOP: A refresh dialog is already open.")
             return 1
 
-        before_text, before = read_time_with_retry()
+        before_text, before = read_time_with_retry(workspace)
         print("BEFORE:", before_text, flush=True)
 
         trigger_script = Path(__file__).resolve().with_name(
@@ -63,12 +75,16 @@ def main():
         if not trigger_script.is_file():
             raise RuntimeError("Refresh script not found.")
 
+        ensure_same_workspace(workspace)
+
+        if get_report_window().handle != report_handle:
+            raise RuntimeError("The report window changed.")
+
         trigger = subprocess.Popen(
             [sys.executable, str(trigger_script)]
         )
 
         deadline = time.monotonic() + 45
-
         started = False
         absent_checks = 0
         read_failures = 0
@@ -86,6 +102,15 @@ def main():
         )
 
         while time.monotonic() < deadline:
+            ensure_same_workspace(workspace)
+
+            trigger_result = trigger.poll()
+
+            if trigger_result is not None and trigger_result != 0:
+                print("UNKNOWN: Refresh trigger failed.")
+                print("Check Power BI. No automatic retry.")
+                return 1
+
             try:
                 dialogs = refresh_dialogs(desktop, report)
                 messages = read_messages(dialogs)
@@ -101,8 +126,9 @@ def main():
                 )
 
                 if read_failures >= 3:
-                    print("UNKNOWN: Repeated observation failures.")
-                    return 1
+                    raise RuntimeError(
+                        "Repeated observation failures."
+                    )
 
                 time.sleep(1)
                 continue
@@ -139,31 +165,34 @@ def main():
 
                     if trigger.poll() != 0:
                         print(
-                            "UNKNOWN: Trigger did not finish "
-                            "successfully."
+                            "UNKNOWN: Trigger completion was not confirmed."
                         )
                         return 1
 
+                    ensure_same_workspace(workspace)
+
+                    if get_report_window().handle != report_handle:
+                        raise RuntimeError(
+                            "The report window changed."
+                        )
+
                     report.set_focus()
 
-                    # ننتظر إتاحة البطاقة بعد إغلاق نافذة التحديث
-                    after_text, after = read_time_with_retry()
+                    after_text, after = read_time_with_retry(
+                        workspace
+                    )
 
-                    print("AFTER:", after_text)
+                    print("AFTER:", after_text, flush=True)
 
                     if after > before:
                         print(
                             "CYCLE OBSERVED: Dialog closed and "
                             "RefreshCheck timestamp advanced."
                         )
-                        print(
-                            "All-table success is not verified."
-                        )
+                        print("All-table success is not verified.")
                         return 0
 
-                    print(
-                        "UNKNOWN: Timestamp did not advance."
-                    )
+                    print("UNKNOWN: Timestamp did not advance.")
                     return 1
 
             time.sleep(0.5)
@@ -177,6 +206,7 @@ def main():
             "UNKNOWN:",
             type(error).__name__,
             str(error),
+            flush=True,
         )
         print("Check Power BI. No automatic retry.")
         return 1
