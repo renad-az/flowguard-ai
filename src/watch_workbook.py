@@ -11,6 +11,10 @@ from monitor_lock import (
 )
 
 
+PROJECT_FOLDER = Path(__file__).resolve().parent.parent
+STOP_FILE = PROJECT_FOLDER / "reports" / "monitor.stop"
+
+
 def file_hash(path):
     digest = hashlib.sha256()
 
@@ -19,6 +23,18 @@ def file_hash(path):
             digest.update(chunk)
 
     return digest.hexdigest()
+
+
+def run_script(script, *arguments):
+    return subprocess.run(
+        [
+            sys.executable,
+            str(script),
+            *[str(argument) for argument in arguments],
+        ],
+        check=False,
+        timeout=120,
+    ).returncode
 
 
 def watch(source, baseline, approved, enable_refresh):
@@ -34,11 +50,17 @@ def watch(source, baseline, approved, enable_refresh):
     print("MONITORING:", source.name, flush=True)
     print("Single-instance lock acquired.", flush=True)
     print("Refresh cycle enabled:", enable_refresh, flush=True)
-    print("Unknown refresh outcome stops monitoring.", flush=True)
-    print("Press Ctrl+C to stop.", flush=True)
+    print("Stop requests take effect between cycles.", flush=True)
 
     while True:
+        if STOP_FILE.exists():
+            print("STOPPED: Safe stop request received.", flush=True)
+            return 0
+
         time.sleep(2)
+
+        if STOP_FILE.exists():
+            continue
 
         try:
             current_hash = file_hash(source)
@@ -78,21 +100,19 @@ def watch(source, baseline, approved, enable_refresh):
         if stable_checks < 3:
             continue
 
+        if STOP_FILE.exists():
+            continue
+
         print("CHECKING: Running validation.", flush=True)
 
-        approval = subprocess.run(
-            [
-                sys.executable,
-                str(approval_script),
-                str(source),
-                str(baseline),
-                str(approved),
-            ],
-            check=False,
-            timeout=120,
+        approval_code = run_script(
+            approval_script,
+            source,
+            baseline,
+            approved,
         )
 
-        if approval.returncode != 0:
+        if approval_code != 0:
             print(
                 "MONITOR: Not approved. Refresh skipped.",
                 flush=True,
@@ -102,21 +122,15 @@ def watch(source, baseline, approved, enable_refresh):
             print("MONITOR: Approval succeeded.", flush=True)
 
             if enable_refresh:
+                # الدورة بدأت؛ نكمل التحديث قبل تنفيذ طلب الإيقاف
                 print(
                     "MONITOR: Starting observed refresh cycle.",
                     flush=True,
                 )
 
-                refresh = subprocess.run(
-                    [
-                        sys.executable,
-                        str(refresh_script),
-                    ],
-                    check=False,
-                    timeout=120,
-                )
+                refresh_code = run_script(refresh_script)
 
-                if refresh.returncode != 0:
+                if refresh_code != 0:
                     print(
                         "MONITOR STOPPED: Refresh outcome "
                         "needs review. No automatic retry.",
@@ -146,7 +160,7 @@ def watch(source, baseline, approved, enable_refresh):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Monitor Excel with guarded Power BI refresh."
+        description="Monitor Excel with a safe stop request."
     )
 
     parser.add_argument("source", type=Path)
@@ -158,7 +172,6 @@ def main():
     source = args.source.resolve()
     baseline = args.baseline.resolve()
     approved = args.approved.resolve()
-
     script_folder = Path(__file__).resolve().parent
 
     if not source.is_file():
@@ -181,6 +194,10 @@ def main():
 
     try:
         with monitor_lock():
+            # نمسح طلب التشغيل السابق بعد امتلاك القفل فقط
+            STOP_FILE.parent.mkdir(parents=True, exist_ok=True)
+            STOP_FILE.unlink(missing_ok=True)
+
             return watch(
                 source,
                 baseline,
@@ -201,10 +218,10 @@ def main():
 
     except KeyboardInterrupt:
         print(
-            "\nMonitoring stopped. If refresh was running, "
-            "check Power BI before restarting."
+            "\nMonitoring interrupted. Check Power BI "
+            "if a refresh was running."
         )
-        return 0
+        return 1
 
     except OSError as error:
         print("MONITOR STOPPED:", error)
