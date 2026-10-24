@@ -3,23 +3,34 @@ import hashlib
 import json
 import os
 import tempfile
+from datetime import datetime, timezone
 from io import BytesIO
 from pathlib import Path
+from uuid import uuid4
 from zipfile import ZipFile
 
 from openpyxl import load_workbook
 
 
+def file_hash(path):
+    digest = hashlib.sha256()
+
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+
+    return digest.hexdigest()
+
+
 def main():
     parser = argparse.ArgumentParser(
-        description="Create and verify a separate corrected workbook."
+        description="Create a verified corrected copy and audit record."
     )
 
     parser.add_argument("source", type=Path)
     parser.add_argument("preview", type=Path)
     parser.add_argument("output", type=Path)
     parser.add_argument("--confirm", action="store_true")
-
     args = parser.parse_args()
 
     if not args.confirm:
@@ -28,6 +39,7 @@ def main():
     source = args.source.resolve()
     preview_path = args.preview.resolve()
     output = args.output.resolve()
+    audit_path = output.with_suffix(".audit.json")
 
     if output in (source, preview_path):
         parser.error("Output must be a separate file.")
@@ -35,11 +47,14 @@ def main():
     if output.suffix.lower() != ".xlsx":
         parser.error("Output must use .xlsx.")
 
-    if output.exists():
-        parser.error("Output already exists. Choose a new filename.")
+    if output.exists() or audit_path.exists():
+        parser.error("Output or audit already exists. Choose a new name.")
 
     workbook = None
     temporary = None
+    audit_temporary = None
+    output_published = False
+    audit_published = False
 
     try:
         plan = json.loads(
@@ -69,6 +84,7 @@ def main():
 
         original_sheets = list(workbook.sheetnames)
         expected_values = {}
+        actions = []
         seen = set()
 
         for candidate in candidates:
@@ -112,9 +128,15 @@ def main():
             cell.value = trimmed
             expected_values[key] = trimmed
 
+            actions.append({
+                "sheet": sheet_name,
+                "column": column_name,
+                "cell": cell.coordinate,
+                "action": "trim_outer_spaces",
+            })
+
         output.parent.mkdir(parents=True, exist_ok=True)
 
-        # نغلق الملف المؤقت قبل استخدامه مع مكتبة Excel
         with tempfile.NamedTemporaryFile(
             dir=output.parent,
             prefix=".trim-pending-",
@@ -127,14 +149,10 @@ def main():
         workbook.close()
         workbook = None
 
-        # فحص سلامة الأرشيف الذي يتكون منه ملف xlsx
         with ZipFile(temporary, "r") as archive:
-            bad_member = archive.testzip()
-
-            if bad_member is not None:
+            if archive.testzip() is not None:
                 raise ValueError("Workbook archive integrity failed.")
 
-        # إعادة فتح النسخة والتأكد من الخلايا المصححة
         verified = load_workbook(
             temporary,
             read_only=True,
@@ -154,28 +172,69 @@ def main():
         finally:
             verified.close()
 
-        if hashlib.sha256(source.read_bytes()).hexdigest() != source_hash:
+        if file_hash(source) != source_hash:
             raise ValueError(
                 "Source changed during correction. Preview again."
             )
 
-        # نشر الملف المكتمل بدون استبدال وجهة موجودة
-        # يحتاج نظام ملفات يدعم hard links، مثل NTFS
+        audit = {
+            "version": 1,
+            "operation_id": uuid4().hex,
+            "created_at_utc": datetime.now(timezone.utc).isoformat(),
+            "confirmation": "explicit_confirm_flag",
+            "source_sha256": source_hash,
+            "output_sha256": file_hash(temporary),
+            "corrected_cells": len(actions),
+            "actions": actions,
+            "checks": {
+                "archive_integrity": "passed",
+                "worksheet_names": "passed",
+                "corrected_cell_values": "passed",
+                "baseline_validation": "not_run_by_this_script",
+            },
+            "scope": (
+                "Separate corrected copy only; "
+                "not approved and no refresh triggered."
+            ),
+        }
+
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=output.parent,
+            prefix=".audit-pending-",
+            suffix=".json",
+            delete=False,
+        ) as file:
+            audit_temporary = Path(file.name)
+            json.dump(audit, file, ensure_ascii=False, indent=2)
+
+        # نشر بدون استبدال ملفات موجودة
         os.link(temporary, output)
+        output_published = True
+
+        os.link(audit_temporary, audit_path)
+        audit_published = True
 
         print("CORRECTED COPY:", output)
-        print("Cells trimmed:", len(seen))
+        print("AUDIT RECORD:", audit_path)
+        print("Cells trimmed:", len(actions))
         print("Archive and corrected-cell checks passed.")
+        print("Baseline validation must be run separately.")
+        print("No cell values stored in the audit record.")
         print("Original source and approved workbook unchanged.")
         print("No Power BI refresh triggered.")
         return 0
 
-    except FileExistsError:
-        print("CORRECTION FAILED: Output already exists.")
-        return 1
-
     except Exception as error:
         print("CORRECTION FAILED:", type(error).__name__, str(error))
+
+        if output_published and not audit_published:
+            print(
+                "A corrected copy was created, but audit publication "
+                "failed. Review manually; do not approve automatically."
+            )
+
         return 1
 
     finally:
@@ -184,6 +243,9 @@ def main():
 
         if temporary is not None:
             temporary.unlink(missing_ok=True)
+
+        if audit_temporary is not None:
+            audit_temporary.unlink(missing_ok=True)
 
 
 if __name__ == "__main__":
